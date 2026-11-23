@@ -11,7 +11,7 @@ Based on upstream `main` at `cd3697e` (30 Oct 2026, released as v0.22.5).
 | Unlisted APIs by `<api>:<version>` | Call any Google API with a Discovery document, not only the built-in list: Search Console, Analytics, YouTube and others | `fix/670-unlisted-api-version` | [#990](https://github.com/googleworkspace/cli/pull/990) (fixes [#670](https://github.com/googleworkspace/cli/issues/670)) |
 | Named auth profiles | One `gws` for several Google accounts: `gws --profile work …` | `feat/auth-profiles` | [#989](https://github.com/googleworkspace/cli/pull/989) by @gfortaine, plus our `gws auth profiles` command |
 | Token cache tied to the credential | A new login (new scopes or another account) never reuses an old access token | `fix/780-token-cache-invalidation` | [#991](https://github.com/googleworkspace/cli/pull/991) (fixes [#780](https://github.com/googleworkspace/cli/issues/780), [#572](https://github.com/googleworkspace/cli/issues/572)) |
-| Gmail `+read <query>` and `+code` | Read the newest matching mails as plain text in one command; pull a one-time code straight into a shell variable | `feat/gmail-read-code` | PR pending |
+| Gmail `+read <query>` and `+code` | Read the newest matching mails as plain text in one command; pull a one-time code straight into a shell variable | `feat/gmail-read-code` | [#992](https://github.com/googleworkspace/cli/pull/992) |
 | Drive `+path`, `+sync`; Docs `+export`, Markdown `+write` | Resolve Drive paths to ids; mirror a local folder to Drive with stable ids (replaces hand-written sync scripts and drive.json maps); move documents between Markdown and Google Docs | `feat/drive-docs-helpers` | PR pending |
 
 ## 1. Unlisted APIs: `<api>:<version>`
