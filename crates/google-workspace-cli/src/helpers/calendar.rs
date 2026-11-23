@@ -130,6 +130,12 @@ TIPS:
                         .value_name("NAME"),
                 )
                 .arg(
+                    Arg::new("all-profiles")
+                        .long("all-profiles")
+                        .help("Merge the agendas of every signed-in auth profile, labelled by profile")
+                        .action(ArgAction::SetTrue),
+                )
+                .arg(
                     Arg::new("timezone")
                         .long("timezone")
                         .alias("tz")
@@ -144,6 +150,7 @@ EXAMPLES:
   gws calendar +agenda --week --format table
   gws calendar +agenda --days 3 --calendar 'Work'
   gws calendar +agenda --today --timezone America/New_York
+  gws calendar +agenda --days 2 --all-profiles
 
 TIPS:
   Read-only — never modifies events.
@@ -197,6 +204,18 @@ TIPS:
                         .action(ArgAction::SetTrue),
                 )
                 .arg(
+                    Arg::new("all-profiles")
+                        .long("all-profiles")
+                        .help("Combine every signed-in auth profile: a slot is free only if it is free in all of them")
+                        .action(ArgAction::SetTrue),
+                )
+                .arg(
+                    Arg::new("emit-busy")
+                        .long("emit-busy")
+                        .hide(true)
+                        .action(ArgAction::SetTrue),
+                )
+                .arg(
                     Arg::new("all-calendars")
                         .long("all-calendars")
                         .help("Also count calendars you only subscribe to (default: calendars you own or edit)")
@@ -216,6 +235,7 @@ EXAMPLES:
   gws calendar +free --days 5 --minutes 60
   gws calendar +free --between 10:00-16:30 --weekdays
   gws calendar +free --calendar Work --format json
+  gws calendar +free --days 3 --all-profiles
 
 TIPS:
   Read-only. Timed events block time unless marked 'free' or declined.
@@ -285,6 +305,9 @@ TIPS:
     }
 }
 async fn handle_agenda(matches: &ArgMatches) -> Result<(), GwsError> {
+    if matches.get_flag("all-profiles") {
+        return handle_agenda_all_profiles(matches).await;
+    }
     let cal_scope = "https://www.googleapis.com/auth/calendar.readonly";
     let token = auth::get_token(&[cal_scope])
         .await
@@ -969,6 +992,328 @@ async fn fetch_busy(
     Ok((busy, errors))
 }
 
+// ── --all-profiles ───────────────────────────────────────────────────
+
+/// Names of the profiles that hold saved credentials, `default` first.
+pub(crate) fn signed_in_profiles(base: &std::path::Path) -> Vec<String> {
+    crate::profile::list_profiles(base)
+        .into_iter()
+        .filter(|p| p.has_credentials)
+        .map(|p| p.name)
+        .collect()
+}
+
+/// Arguments for a child `+agenda` run in one profile, carrying the
+/// window flags and the parent's timezone so every profile uses one day.
+pub(crate) fn agenda_child_args(profile: &str, matches: &ArgMatches, tz: &str) -> Vec<String> {
+    let mut args: Vec<String> = ["--profile", profile, "calendar", "+agenda"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    for flag in ["today", "tomorrow", "week"] {
+        if matches.get_flag(flag) {
+            args.push(format!("--{flag}"));
+        }
+    }
+    for opt in ["days", "calendar"] {
+        if let Some(v) = matches.get_one::<String>(opt) {
+            args.push(format!("--{opt}"));
+            args.push(v.clone());
+        }
+    }
+    args.extend([
+        "--timezone".into(),
+        tz.into(),
+        "--format".into(),
+        "json".into(),
+    ]);
+    args
+}
+
+/// Arguments for a child `+free --emit-busy` run in one profile.
+pub(crate) fn free_child_args(profile: &str, matches: &ArgMatches, tz: &str) -> Vec<String> {
+    let mut args: Vec<String> = ["--profile", profile, "calendar", "+free", "--emit-busy"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    if let Some(d) = matches.get_one::<i64>("days") {
+        args.extend(["--days".into(), d.to_string()]);
+    }
+    if let Some(b) = matches.get_one::<String>("between") {
+        args.extend(["--between".into(), b.clone()]);
+    }
+    for flag in ["weekdays", "all-calendars", "count-all-day"] {
+        if matches.get_flag(flag) {
+            args.push(format!("--{flag}"));
+        }
+    }
+    for c in matches.get_many::<String>("calendar").into_iter().flatten() {
+        args.extend(["--calendar".into(), c.clone()]);
+    }
+    args.extend(["--timezone".into(), tz.into()]);
+    args
+}
+
+/// Runs this binary once per profile, concurrently, and parses each run's
+/// JSON stdout. A failed profile yields `Err` with its last stderr line.
+async fn run_per_profile(
+    profiles: &[String],
+    args_for: impl Fn(&str) -> Vec<String>,
+) -> Result<Vec<(String, Result<Value, String>)>, GwsError> {
+    let exe = std::env::current_exe()
+        .map_err(|e| GwsError::Other(anyhow::anyhow!("Cannot locate the gws binary: {e}")))?;
+    let runs = profiles.iter().map(|p| {
+        let args = args_for(p);
+        let exe = exe.clone();
+        let name = p.clone();
+        async move {
+            let out = tokio::process::Command::new(&exe)
+                .args(&args)
+                .env_remove(crate::profile::PROFILE_ENV_VAR)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .await;
+            let result = match out {
+                Ok(o) if o.status.success() => serde_json::from_slice::<Value>(&o.stdout)
+                    .map_err(|e| format!("unreadable output: {e}")),
+                Ok(o) => {
+                    let stderr = String::from_utf8_lossy(&o.stderr);
+                    Err(stderr
+                        .lines()
+                        .rev()
+                        .find(|l| !l.trim().is_empty() && !l.starts_with("Using keyring"))
+                        .unwrap_or("failed")
+                        .trim()
+                        .to_string())
+                }
+                Err(e) => Err(e.to_string()),
+            };
+            (name, result)
+        }
+    });
+    Ok(futures_util::future::join_all(runs).await)
+}
+
+/// Merges per-profile agenda results: each event labelled with its profile,
+/// sorted by start. Failed profiles become warnings.
+pub(crate) fn merge_profile_agendas(
+    results: Vec<(String, Result<Value, String>)>,
+) -> (Vec<Value>, Option<(String, String)>, Vec<String>) {
+    let mut events = Vec::new();
+    let mut window = None;
+    let mut warnings = Vec::new();
+    for (profile, r) in results {
+        match r {
+            Ok(v) => {
+                if window.is_none() {
+                    if let (Some(a), Some(b)) = (
+                        v.get("timeMin").and_then(|x| x.as_str()),
+                        v.get("timeMax").and_then(|x| x.as_str()),
+                    ) {
+                        window = Some((a.to_string(), b.to_string()));
+                    }
+                }
+                for mut e in v
+                    .get("events")
+                    .and_then(|e| e.as_array())
+                    .cloned()
+                    .unwrap_or_default()
+                {
+                    e["profile"] = json!(profile);
+                    events.push(e);
+                }
+            }
+            Err(msg) => warnings.push(format!("profile '{profile}' skipped: {msg}")),
+        }
+    }
+    events.sort_by(|a, b| {
+        let k = |v: &Value| {
+            v.get("start")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string()
+        };
+        k(a).cmp(&k(b))
+    });
+    (events, window, warnings)
+}
+
+/// Merges per-profile `--emit-busy` results.
+pub(crate) fn merge_profile_busy(
+    results: Vec<(String, Result<Value, String>)>,
+) -> (Vec<Interval>, Vec<(String, String)>, Vec<String>) {
+    let mut busy = Vec::new();
+    let mut calendars = Vec::new();
+    let mut errors = Vec::new();
+    for (profile, r) in results {
+        let v = match r {
+            Ok(v) => v,
+            Err(msg) => {
+                errors.push(format!("profile '{profile}' (skipped): {msg}"));
+                continue;
+            }
+        };
+        for pair in v
+            .get("busy")
+            .and_then(|b| b.as_array())
+            .into_iter()
+            .flatten()
+        {
+            let t = |i: usize| {
+                pair.get(i)
+                    .and_then(|x| x.as_str())
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                    .map(|d| d.with_timezone(&chrono::Utc))
+            };
+            if let (Some(s), Some(e)) = (t(0), t(1)) {
+                busy.push((s, e));
+            }
+        }
+        for c in v
+            .get("calendars")
+            .and_then(|c| c.as_array())
+            .into_iter()
+            .flatten()
+        {
+            let id = c
+                .get("id")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            let name = c.get("name").and_then(|x| x.as_str()).unwrap_or("");
+            calendars.push((id, format!("{profile}: {name}")));
+        }
+        for e in v
+            .get("errors")
+            .and_then(|c| c.as_array())
+            .into_iter()
+            .flatten()
+        {
+            if let Some(e) = e.as_str() {
+                errors.push(format!("{profile}: {e}"));
+            }
+        }
+    }
+    (busy, calendars, errors)
+}
+
+fn profiles_or_error() -> Result<Vec<String>, GwsError> {
+    let profiles = signed_in_profiles(&crate::auth_commands::config_dir());
+    if profiles.is_empty() {
+        return Err(GwsError::Auth(
+            "No signed-in profiles (see: gws auth profiles)".into(),
+        ));
+    }
+    Ok(profiles)
+}
+
+/// The timezone every profile should use: --timezone, else the active
+/// profile's account timezone.
+async fn shared_timezone(matches: &ArgMatches) -> Result<chrono_tz::Tz, GwsError> {
+    let tz_override = matches.get_one::<String>("timezone").map(|s| s.as_str());
+    if let Some(t) = tz_override {
+        return crate::timezone::parse_timezone(t);
+    }
+    let token = auth::get_token(&["https://www.googleapis.com/auth/calendar.readonly"])
+        .await
+        .map_err(|e| GwsError::Auth(format!("Calendar auth failed: {e}")))?;
+    let client = crate::client::build_client()?;
+    crate::timezone::resolve_account_timezone(&client, &token, None).await
+}
+
+async fn handle_agenda_all_profiles(matches: &ArgMatches) -> Result<(), GwsError> {
+    let profiles = profiles_or_error()?;
+    let tz = shared_timezone(matches).await?;
+    let tz_name = tz.to_string();
+    let results = run_per_profile(&profiles, |p| agenda_child_args(p, matches, &tz_name)).await?;
+    let (events, window, warnings) = merge_profile_agendas(results);
+    for w in &warnings {
+        eprintln!("warning: {w}");
+    }
+    let format = matches
+        .get_one::<String>("format")
+        .map(|s| crate::formatter::OutputFormat::from_str(s))
+        .unwrap_or(crate::formatter::OutputFormat::Table);
+    let (time_min, time_max) = window.unwrap_or_default();
+    print!("{}", render_agenda(&events, &time_min, &time_max, &format));
+    Ok(())
+}
+
+async fn profiles_busy(
+    matches: &ArgMatches,
+    tz: &chrono_tz::Tz,
+) -> Result<(Vec<Interval>, Vec<(String, String)>, Vec<String>), GwsError> {
+    let profiles = profiles_or_error()?;
+    let tz_name = tz.to_string();
+    let results = run_per_profile(&profiles, |p| free_child_args(p, matches, &tz_name)).await?;
+    Ok(merge_profile_busy(results))
+}
+
+/// Busy intervals across the active profile's selected calendars, with the
+/// calendars checked and any per-calendar errors.
+async fn own_busy(
+    client: &reqwest::Client,
+    token: &str,
+    tz: &chrono_tz::Tz,
+    matches: &ArgMatches,
+    time_min: &str,
+    time_max: &str,
+) -> Result<(Vec<Interval>, Vec<(String, String)>, Vec<String>), GwsError> {
+    let filters: Vec<String> = matches
+        .get_many::<String>("calendar")
+        .map(|v| v.cloned().collect())
+        .unwrap_or_default();
+    let list = crate::executor::fetch_json(
+        || {
+            client
+                .get("https://www.googleapis.com/calendar/v3/users/me/calendarList")
+                .query(&[("maxResults", "250")])
+                .bearer_auth(token)
+        },
+        "Calendar list",
+    )
+    .await?;
+    let calendars = select_calendars(&list, &filters, matches.get_flag("all-calendars"));
+    if calendars.is_empty() {
+        return Err(GwsError::Validation(
+            "No calendars matched; check --calendar (see: gws calendar calendarList list)".into(),
+        ));
+    }
+    let count_all_day = matches.get_flag("count-all-day");
+    let mut busy: Vec<Interval> = Vec::new();
+    let mut freebusy_only: Vec<(String, String)> = Vec::new();
+    {
+        use futures_util::stream::{self, StreamExt};
+        let results: Vec<_> = stream::iter(calendars.iter().cloned())
+            .map(|(id, name)| {
+                let (client, token, time_min, time_max, tz) =
+                    (client, token, time_min, time_max, tz);
+                async move {
+                    let r =
+                        busy_from_events(client, token, &id, time_min, time_max, tz, count_all_day)
+                            .await;
+                    ((id, name), r)
+                }
+            })
+            .buffer_unordered(5)
+            .collect()
+            .await;
+        for (cal, r) in results {
+            match r? {
+                Some(b) => busy.extend(b),
+                None => freebusy_only.push(cal),
+            }
+        }
+    }
+    let mut errors = Vec::new();
+    if !freebusy_only.is_empty() {
+        let (b, e) = fetch_busy(client, token, &freebusy_only, time_min, time_max).await?;
+        busy.extend(b);
+        errors = e;
+    }
+    Ok((busy, calendars, errors))
+}
+
 async fn handle_free(matches: &ArgMatches) -> Result<(), GwsError> {
     let window = parse_between(
         matches
@@ -978,10 +1323,6 @@ async fn handle_free(matches: &ArgMatches) -> Result<(), GwsError> {
     )?;
     let days = *matches.get_one::<i64>("days").unwrap_or(&3);
     let min_minutes = *matches.get_one::<i64>("minutes").unwrap_or(&30);
-    let filters: Vec<String> = matches
-        .get_many::<String>("calendar")
-        .map(|v| v.cloned().collect())
-        .unwrap_or_default();
     let format = matches
         .get_one::<String>("format")
         .map(|s| crate::formatter::OutputFormat::from_str(s))
@@ -1004,53 +1345,19 @@ async fn handle_free(matches: &ArgMatches) -> Result<(), GwsError> {
     let time_min = first.0.to_rfc3339();
     let time_max = last.1.to_rfc3339();
 
-    let list = crate::executor::fetch_json(
-        || {
-            client
-                .get("https://www.googleapis.com/calendar/v3/users/me/calendarList")
-                .query(&[("maxResults", "250")])
-                .bearer_auth(&token)
-        },
-        "Calendar list",
-    )
-    .await?;
-    let calendars = select_calendars(&list, &filters, matches.get_flag("all-calendars"));
-    if calendars.is_empty() {
-        return Err(GwsError::Validation(
-            "No calendars matched; check --calendar (see: gws calendar calendarList list)".into(),
-        ));
-    }
-    let count_all_day = matches.get_flag("count-all-day");
-    let mut busy: Vec<Interval> = Vec::new();
-    let mut freebusy_only: Vec<(String, String)> = Vec::new();
-    {
-        use futures_util::stream::{self, StreamExt};
-        let results: Vec<_> = stream::iter(calendars.iter().cloned())
-            .map(|(id, name)| {
-                let (client, token, time_min, time_max, tz) =
-                    (&client, &token, &time_min, &time_max, &tz);
-                async move {
-                    let r =
-                        busy_from_events(client, token, &id, time_min, time_max, tz, count_all_day)
-                            .await;
-                    ((id, name), r)
-                }
-            })
-            .buffer_unordered(5)
-            .collect()
-            .await;
-        for (cal, r) in results {
-            match r? {
-                Some(b) => busy.extend(b),
-                None => freebusy_only.push(cal),
-            }
-        }
-    }
-    let mut errors = Vec::new();
-    if !freebusy_only.is_empty() {
-        let (b, e) = fetch_busy(&client, &token, &freebusy_only, &time_min, &time_max).await?;
-        busy.extend(b);
-        errors = e;
+    let (busy, calendars, errors) = if matches.get_flag("all-profiles") {
+        profiles_busy(matches, &tz).await?
+    } else {
+        own_busy(&client, &token, &tz, matches, &time_min, &time_max).await?
+    };
+    if matches.get_flag("emit-busy") {
+        let out = json!({
+            "busy": busy.iter().map(|(s, e)| json!([s.to_rfc3339(), e.to_rfc3339()])).collect::<Vec<_>>(),
+            "calendars": calendars.iter().map(|(id, name)| json!({"id": id, "name": name})).collect::<Vec<_>>(),
+            "errors": errors,
+        });
+        println!("{out}");
+        return Ok(());
     }
     for e in &errors {
         eprintln!("warning: could not read busy times for {e}");
@@ -1086,7 +1393,8 @@ async fn handle_free(matches: &ArgMatches) -> Result<(), GwsError> {
         "timeMin": time_min,
         "timeMax": time_max,
         "calendars": calendars.iter().map(|(id, name)| json!({"id": id, "name": name})).collect::<Vec<_>>(),
-        "countAllDay": count_all_day,
+        "countAllDay": matches.get_flag("count-all-day"),
+        "allProfiles": matches.get_flag("all-profiles"),
         "errors": errors,
     });
     let rendered = crate::formatter::render_report(
@@ -1761,5 +2069,163 @@ mod tests {
         let mut ooo = all_day.clone();
         ooo["eventType"] = json!("outOfOffice");
         assert!(event_busy_interval(&ooo, &tz, false).is_some());
+    }
+    // ── --all-profiles ──────────────────────────────────────────────
+
+    fn helper_matches(args: &[&str]) -> ArgMatches {
+        let root = Command::new("gws").arg(Arg::new("format").long("format").global(true));
+        let cmd = CalendarHelper.inject_commands(root, &Default::default());
+        let mut argv = vec!["gws"];
+        argv.extend_from_slice(args);
+        let m = cmd.try_get_matches_from(argv).unwrap();
+        let (_, sub) = m.subcommand().unwrap();
+        sub.clone()
+    }
+
+    #[test]
+    fn signed_in_profiles_lists_only_those_with_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        std::fs::write(base.join("credentials.enc"), b"x").unwrap();
+        for (name, signed) in [("bachs", true), ("darasimi", false)] {
+            let d = base.join("profiles").join(name);
+            std::fs::create_dir_all(&d).unwrap();
+            if signed {
+                std::fs::write(d.join("credentials.enc"), b"x").unwrap();
+            }
+        }
+        assert_eq!(signed_in_profiles(base), vec!["default", "bachs"]);
+    }
+
+    #[test]
+    fn agenda_child_args_forward_window_and_timezone() {
+        let m = helper_matches(&[
+            "+agenda",
+            "--days",
+            "2",
+            "--calendar",
+            "Work",
+            "--all-profiles",
+        ]);
+        assert_eq!(
+            agenda_child_args("bachs", &m, "Africa/Lagos"),
+            vec![
+                "--profile",
+                "bachs",
+                "calendar",
+                "+agenda",
+                "--days",
+                "2",
+                "--calendar",
+                "Work",
+                "--timezone",
+                "Africa/Lagos",
+                "--format",
+                "json"
+            ]
+        );
+        let m = helper_matches(&["+agenda", "--today"]);
+        let a = agenda_child_args("default", &m, "UTC");
+        assert!(a.contains(&"--today".to_string()));
+        assert!(!a.contains(&"--all-profiles".to_string()));
+    }
+
+    #[test]
+    fn free_child_args_forward_options() {
+        let m = helper_matches(&[
+            "+free",
+            "--days",
+            "5",
+            "--between",
+            "10:00-16:00",
+            "--weekdays",
+            "--count-all-day",
+            "--calendar",
+            "A",
+            "--calendar",
+            "B",
+            "--all-profiles",
+        ]);
+        assert_eq!(
+            free_child_args("bachs", &m, "Africa/Lagos"),
+            vec![
+                "--profile",
+                "bachs",
+                "calendar",
+                "+free",
+                "--emit-busy",
+                "--days",
+                "5",
+                "--between",
+                "10:00-16:00",
+                "--weekdays",
+                "--count-all-day",
+                "--calendar",
+                "A",
+                "--calendar",
+                "B",
+                "--timezone",
+                "Africa/Lagos"
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_agendas_labels_sorts_and_warns() {
+        let (events, window, warnings) = merge_profile_agendas(vec![
+            (
+                "default".into(),
+                Ok(json!({"timeMin": "a", "timeMax": "b", "events": [
+                    {"start": "2026-11-24T12:00:00+01:00", "summary": "Lunch"}
+                ]})),
+            ),
+            (
+                "bachs".into(),
+                Ok(json!({"timeMin": "a", "timeMax": "b", "events": [
+                    {"start": "2026-11-24T09:00:00+01:00", "summary": "Standup"}
+                ]})),
+            ),
+            ("darasimi".into(), Err("No credentials found".into())),
+        ]);
+        assert_eq!(events[0]["summary"], "Standup");
+        assert_eq!(events[0]["profile"], "bachs");
+        assert_eq!(events[1]["profile"], "default");
+        assert_eq!(window, Some(("a".into(), "b".into())));
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("darasimi"));
+    }
+
+    #[test]
+    fn merge_busy_across_profiles() {
+        let (busy, cals, errors) = merge_profile_busy(vec![
+            (
+                "default".into(),
+                Ok(
+                    json!({"busy": [["2026-11-24T09:00:00Z", "2026-11-24T10:00:00Z"]],
+                          "calendars": [{"id": "me@x", "name": "Me"}], "errors": []}),
+                ),
+            ),
+            (
+                "bachs".into(),
+                Ok(
+                    json!({"busy": [["2026-11-24T11:00:00Z", "2026-11-24T12:00:00Z"], ["bad"]],
+                          "calendars": [{"id": "h@b", "name": "Work"}], "errors": ["x: notFound"]}),
+                ),
+            ),
+            ("other".into(), Err("boom".into())),
+        ]);
+        assert_eq!(busy.len(), 2);
+        assert_eq!(cals[1].1, "bachs: Work");
+        assert_eq!(
+            errors,
+            vec!["bachs: x: notFound", "profile 'other' (skipped): boom"]
+        );
+        let slots = free_slots(
+            &[(utc("2026-11-24T08:00:00Z"), utc("2026-11-24T13:00:00Z"))],
+            busy,
+            utc("2026-11-20T00:00:00Z"),
+            30,
+        );
+        assert_eq!(slots.len(), 3);
     }
 }

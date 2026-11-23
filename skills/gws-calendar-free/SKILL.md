@@ -33,6 +33,8 @@ gws calendar +free
 | `--weekdays` | — | — | Skip Saturdays and Sundays |
 | `--calendar` | — | — | Only check calendars whose name or ID matches (repeatable) |
 | `--count-all-day` | — | — | Let busy all-day events block whole days (by default only out-of-office ones do) |
+| `--all-profiles` | — | — | Combine every signed-in auth profile: a slot is free only if it is free in all of them |
+| `--emit-busy` | — | — | — |
 | `--all-calendars` | — | — | Also count calendars you only subscribe to (default: calendars you own or edit) |
 | `--timezone` | — | — | IANA timezone for --between and the output. Defaults to your Google account timezone. |
 
@@ -43,6 +45,7 @@ gws calendar +free
 gws calendar +free --days 5 --minutes 60
 gws calendar +free --between 10:00-16:30 --weekdays
 gws calendar +free --calendar Work --format json
+gws calendar +free --days 3 --all-profiles
 ```
 
 ## Tips
