@@ -136,6 +136,24 @@ pub const SERVICES: &[ServiceEntry] = &[
         version: "v1",
         description: "Manage Google Apps Script projects",
     },
+    ServiceEntry {
+        aliases: &["searchconsole"],
+        api_name: "searchconsole",
+        version: "v1",
+        description: "Search performance, sitemaps and URL inspection",
+    },
+    ServiceEntry {
+        aliases: &["analytics"],
+        api_name: "analyticsdata",
+        version: "v1beta",
+        description: "Google Analytics 4 reports and audience data",
+    },
+    ServiceEntry {
+        aliases: &["youtube"],
+        api_name: "youtube",
+        version: "v3",
+        description: "Upload and manage YouTube videos, playlists and channels",
+    },
 ];
 
 /// Splits a service spec of the form `<service>` or `<service>:<version>`.
@@ -223,6 +241,26 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_service_reporting_apis() {
+        assert_eq!(
+            resolve_service("searchconsole").unwrap(),
+            ("searchconsole".to_string(), "v1".to_string())
+        );
+        assert_eq!(
+            resolve_service("analytics").unwrap(),
+            ("analyticsdata".to_string(), "v1beta".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_service_youtube() {
+        assert_eq!(
+            resolve_service("youtube").unwrap(),
+            ("youtube".to_string(), "v3".to_string())
+        );
+    }
+
+    #[test]
     fn test_resolve_service_unknown() {
         let err = resolve_service("unknown_service");
         assert!(err.is_err());
@@ -273,9 +311,9 @@ mod tests {
 
     #[test]
     fn test_resolve_service_unlisted_without_version_errors() {
-        match resolve_service("searchconsole").unwrap_err() {
+        match resolve_service("pagespeedonline").unwrap_err() {
             GwsError::Validation(msg) => {
-                assert!(msg.contains("Unknown service 'searchconsole'"));
+                assert!(msg.contains("Unknown service 'pagespeedonline'"));
                 assert!(msg.contains("<api>:<version>"));
             }
             _ => panic!("Expected Validation error"),

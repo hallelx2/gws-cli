@@ -16,16 +16,21 @@ use crate::error::GwsError;
 use clap::{ArgMatches, Command};
 use std::future::Future;
 use std::pin::Pin;
+pub mod analytics;
 pub mod calendar;
 pub mod chat;
 pub mod docs;
 pub mod drive;
 pub mod events;
+pub mod forms;
 pub mod gmail;
+pub mod meet;
 pub mod modelarmor;
 pub mod script;
+pub mod searchconsole;
 pub mod sheets;
 pub mod workflows;
+pub mod youtube;
 
 /// Base URL for the Google Cloud Pub/Sub v1 API.
 ///
@@ -109,6 +114,13 @@ pub trait Helper: Send + Sync {
     fn helper_only(&self) -> bool {
         false
     }
+
+    /// Extra `--format` values this service's helpers understand beyond the
+    /// shared json/table/yaml/csv (e.g. `text` for `meet +transcript`), so the
+    /// global parser does not warn about them.
+    fn extra_formats(&self) -> &'static [&'static str] {
+        &[]
+    }
 }
 
 pub fn get_helper(service: &str) -> Option<Box<dyn Helper>> {
@@ -118,11 +130,16 @@ pub fn get_helper(service: &str) -> Option<Box<dyn Helper>> {
         "docs" => Some(Box::new(docs::DocsHelper)),
         "chat" => Some(Box::new(chat::ChatHelper)),
         "drive" => Some(Box::new(drive::DriveHelper)),
+        "meet" => Some(Box::new(meet::MeetHelper)),
         "calendar" => Some(Box::new(calendar::CalendarHelper)),
         "script" | "apps-script" => Some(Box::new(script::ScriptHelper)),
         "workspaceevents" => Some(Box::new(events::EventsHelper)),
         "modelarmor" => Some(Box::new(modelarmor::ModelArmorHelper)),
         "workflow" => Some(Box::new(workflows::WorkflowHelper)),
+        "searchconsole" => Some(Box::new(searchconsole::SearchConsoleHelper)),
+        "analyticsdata" => Some(Box::new(analytics::AnalyticsHelper)),
+        "youtube" => Some(Box::new(youtube::YouTubeHelper)),
+        "forms" => Some(Box::new(forms::FormsHelper)),
         _ => None,
     }
 }

@@ -919,6 +919,8 @@ fn map_service_to_scope_prefixes(service: &str) -> Vec<&str> {
         "slides" => vec!["presentations"],
         "docs" => vec!["documents"],
         "people" => vec!["contacts", "directory"],
+        "searchconsole" => vec!["webmasters"],
+        "analytics" | "analyticsdata" | "analyticsadmin" => vec!["analytics"],
         s => vec![s],
     }
 }
@@ -2442,6 +2444,26 @@ mod tests {
         ));
         assert!(scope_matches_service(
             "https://www.googleapis.com/auth/presentations",
+            &services
+        ));
+    }
+
+    #[test]
+    fn scope_matches_service_reporting_apis() {
+        let services: HashSet<String> = ["searchconsole", "analytics"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(scope_matches_service(
+            "https://www.googleapis.com/auth/webmasters.readonly",
+            &services
+        ));
+        assert!(scope_matches_service(
+            "https://www.googleapis.com/auth/analytics.readonly",
+            &services
+        ));
+        assert!(!scope_matches_service(
+            "https://www.googleapis.com/auth/drive",
             &services
         ));
     }

@@ -11,8 +11,13 @@ Based on upstream `main` at `cd3697e` (30 Oct 2026, released as v0.22.5).
 | Unlisted APIs by `<api>:<version>` | Call any Google API with a Discovery document, not only the built-in list: Search Console, Analytics, YouTube and others | `fix/670-unlisted-api-version` | [#990](https://github.com/googleworkspace/cli/pull/990) (fixes [#670](https://github.com/googleworkspace/cli/issues/670)) |
 | Named auth profiles | One `gws` for several Google accounts: `gws --profile work …` | `feat/auth-profiles` | [#989](https://github.com/googleworkspace/cli/pull/989) by @gfortaine, plus our `gws auth profiles` command |
 | Token cache tied to the credential | A new login (new scopes or another account) never reuses an old access token | `fix/780-token-cache-invalidation` | [#991](https://github.com/googleworkspace/cli/pull/991) (fixes [#780](https://github.com/googleworkspace/cli/issues/780), [#572](https://github.com/googleworkspace/cli/issues/572)) |
-| Gmail `+read <query>` and `+code` | Read the newest matching mails as plain text in one command; pull a one-time code straight into a shell variable | `feat/gmail-read-code` | PR pending |
+| Gmail `+read <query>` and `+code` | Read the newest matching mails as plain text in one command; pull a one-time code straight into a shell variable | `feat/gmail-read-code` | [#992](https://github.com/googleworkspace/cli/pull/992) |
 | Drive `+path`, `+sync`; Docs `+export`, Markdown `+write` | Resolve Drive paths to ids; mirror a local folder to Drive with stable ids (replaces hand-written sync scripts and drive.json maps); move documents between Markdown and Google Docs | `feat/drive-docs-helpers` | [#994](https://github.com/googleworkspace/cli/pull/994) |
+| Meet `+recent`, `+attendees`, `+transcript`, `+notes`, `+recording`, `+new` | After a call, pull its attendees, transcript, Gemini notes and recording in one command each; list recent meetings with their Calendar titles; make a meeting link with a Calendar event | `feat/meet-helpers` | [#993](https://github.com/googleworkspace/cli/pull/993) |
+| Search Console and Analytics `+report`, `+properties` | One-command search performance and GA4 reports as a table, CSV or JSON, with a clear "no data in range" line | `feat/report-helpers` (on `feat/ordered-report-output`) | PR pending |
+| YouTube `+upload`, `+videos` | Resumable upload with progress, private by default, thumbnail and playlist; list your recent uploads with stats | `feat/youtube-helpers` | PR pending |
+| Forms `+responses` | One row per response, question titles as headers, `--since` | `feat/forms-responses` | PR pending |
+| Calendar Meet links, `+free`, `--all-profiles` | `+agenda` shows the Meet link; `+free` finds open slots in working hours; both can merge every signed-in profile | `feat/calendar-agenda-free`, `feat/calendar-all-profiles` | PR pending (`--all-profiles` waits on #989) |
 
 ## 1. Unlisted APIs: `<api>:<version>`
 
@@ -117,6 +122,91 @@ Verified live on 2026-11-23: a re-sync after editing one file kept that file's i
 
 Code: `crates/google-workspace-cli/src/helpers/drive/{api,path,sync}.rs`, `helpers/docs/{export,write,json_to_md}.rs`.
 
+## 6. Google Meet: `+recent`, `+attendees`, `+transcript`, `+notes`, `+recording`, `+new`
+
+After a call, one command each pulls what happened in it. The helpers join the Meet REST API v2 with Calendar (event titles, notes attachments) and Drive (Doc exports, recording files). Every helper takes a conference record (`conferenceRecords/ID`), a meeting code (`abc-defg-hij`), a pasted Meet link, or `latest`.
+
+```bash
+gws meet +recent                              # last 7 days: start, duration, code, Calendar title, head count
+gws meet +recent --days 30 --limit 5 --format json
+gws meet +attendees latest                    # name, signed-in/anonymous/phone, first join, last leave, total time
+gws meet +transcript latest                   # "[00:12:31] Ada: …" speaker-labelled text
+gws meet +transcript abc-defg-hij --format json
+gws meet +notes latest                        # Gemini "Take notes for me" notes as text
+gws meet +recording latest --download recordings
+gws meet +new --title 'Design review' --minutes 45   # link + Calendar event holding it
+gws --profile bachs meet +recent              # works with any profile
+```
+
+- When a meeting has no transcript, notes or recording, the helper says so and exits 1 (`notFound`). It never prints an empty success.
+- `+transcript` reads `transcripts.entries` and resolves speakers through the participant list. When the API has no entries, it exports the transcript Doc instead.
+- `+notes` reads Meet smart notes first. If there are none, it falls back to the Gemini notes Doc attached to the Calendar event.
+- `+recording --download` takes a relative directory inside the current one. It names files after the Drive file and adds the missing `.mp4`. It skips files already downloaded at full size, and an interrupted download resumes from its `.part` file.
+- Listing helpers default to `--format table`. `+transcript` and `+notes` default to plain text (`--format text`), and `--format json` gives structured output.
+- Event titles come from the primary calendar. A meeting nobody put on your calendar has no title.
+- Needed scopes: `meetings.space.readonly` (plus `meetings.space.created` for `+new`), `calendar`, `drive`.
+
+Code: `crates/google-workspace-cli/src/helpers/meet/`.
+
+## 7. Search Console and Analytics reports
+
+```bash
+gws searchconsole +report sc-domain:example.com                 # top 25 queries, last 28 days
+gws searchconsole +report sc-domain:example.com --by page,device --days 90 --limit 100
+gws searchconsole +report https://example.com/ --by date --format csv
+gws analytics +properties                                        # every GA4 account and property you can read
+gws analytics +report 123456789 --by country --days 28
+gws analytics +report properties/123456789 --by date,deviceCategory --metrics activeUsers,sessions
+```
+
+- `+report` (Search Console) takes `--by` from query, page, country, device, date and searchAppearance, `--days` (default 28) or `--start/--end`, `--limit` (default 25, at most 25,000), `--type` (web, image, video, news, discover, googleNews) and `--final-only`. A totals line is fetched alongside. CTR shows as a percent and position to one decimal.
+- `+report` (Analytics) checks dimensions and metrics against an allowlist before the call. Default metrics are activeUsers, newUsers, sessions, screenPageViews and engagementRate; rows sort by the first metric, or by date when `--by date`. `G-` measurement ids are rejected with a hint to use the numeric property id.
+- An empty range prints `No data in range: …` instead of an empty table; CSV keeps its header and puts the note on stderr; JSON carries a `note` field.
+- **Scope:** the Analytics Data API needs `analytics.readonly`; `analytics.edit` is not enough. A 403 prints the exact `gws auth login --scopes …` line to add it. Search Console needs `webmasters` or `webmasters.readonly`.
+- `--dry-run` prints the request(s) without calling the API.
+
+Code: `helpers/searchconsole.rs`, `helpers/analytics.rs`; shared ordered output in `formatter.rs` (`render_report`) and `executor.rs` (`fetch_json`).
+
+## 8. YouTube: `+upload` and `+videos`
+
+```bash
+gws youtube +videos --limit 10
+gws youtube +upload clip.mp4 --title 'Launch' --description @desc.md --tags 'mbprep,launch' --dry-run
+gws youtube +upload clip.mp4 --title 'Launch' --privacy unlisted --thumbnail thumb.png --playlist PLxxxx
+```
+
+- `+upload` is resumable in 8 MiB chunks, with a progress line (deciles when stdout isn't a terminal). On a 5xx, 429 or dropped connection it asks the server how much it holds and resumes from there, up to 8 retries with backoff. Privacy defaults to **private**. `--publish-at` schedules a private video. Title (≤100 chars), description (≤5000 bytes, `@file` allowed), tags (≤500 chars) and file types are checked before any request. A thumbnail or playlist failure after a successful upload becomes a warning, not an error, so the video id is never lost.
+- `+videos` lists your channel's uploads newest first: published, title, privacy, views, likes, comments, duration, url.
+- `--dry-run` prints every request `+upload` would make, without auth.
+
+Code: `helpers/youtube.rs`.
+
+## 9. Forms: `+responses`
+
+```bash
+gws forms +responses 1AbC…xyz                      # or the form's edit URL
+gws forms +responses FORM_URL --since 2026-11-01 --format csv > responses.csv
+```
+
+One row per response, sorted by submit time, with the question titles as headers. Grid questions become one column per row (`Title [row]`); several answers join with `; `; uploaded files show as name plus Drive link. Email and score columns appear only when the form collects them. The public `/forms/d/e/…` link is rejected with a hint to use the edit URL.
+
+Code: `helpers/forms.rs`.
+
+## 10. Calendar: Meet links, `+free`, `--all-profiles`
+
+```bash
+gws calendar +agenda --days 1                       # now with a meet column
+gws calendar +free --days 3 --minutes 30 --between 09:00-18:00
+gws calendar +free --all-profiles --weekdays        # busy time merged across every signed-in profile
+gws calendar +agenda --all-profiles
+```
+
+- `+agenda` adds the Meet link (hangoutLink, or the conference video entry point) and prints `No events between …` when empty.
+- `+free` reads events, not freeBusy, so it can skip what shouldn't block you: cancelled, "free"/transparent and declined events, and all-day events unless they are out-of-office (or `--count-all-day`). It falls back to freeBusy for calendars it can't list. Slots start on the quarter hour, in the calendar's time zone (Africa/Lagos here) or `--timezone`.
+- `--all-profiles` runs the same command once per signed-in profile and merges the results; profiles without credentials are skipped with a note. It depends on named profiles (§2), so it is fork-only until #989 lands.
+
+Code: `helpers/calendar.rs`.
+
 ## Building and installing
 
 ```bash
@@ -135,7 +225,8 @@ It uses the same config dir and keyring as the upstream binary, so an existing l
 git fetch origin                     # origin = googleworkspace/cli
 git checkout hallelx2-main
 git merge origin/main                # then re-merge any branch that changed:
-git merge fix/670-unlisted-api-version feat/auth-profiles fix/780-token-cache-invalidation feat/gmail-read-code feat/drive-docs-helpers
+git merge fix/670-unlisted-api-version feat/auth-profiles fix/780-token-cache-invalidation feat/gmail-read-code feat/drive-docs-helpers feat/meet-helpers \
+  feat/report-helpers feat/youtube-helpers feat/forms-responses feat/calendar-all-profiles
 cargo test && cargo build --release
 ```
 

@@ -32,6 +32,7 @@ gws calendar +agenda
 | `--week` | — | — | Show this week's events |
 | `--days` | — | — | Number of days ahead to show |
 | `--calendar` | — | — | Filter to specific calendar name or ID |
+| `--all-profiles` | — | — | Merge the agendas of every signed-in auth profile, labelled by profile |
 | `--timezone` | — | — | IANA timezone override (e.g. America/Denver). Defaults to Google account timezone. |
 
 ## Examples
@@ -42,6 +43,7 @@ gws calendar +agenda --today
 gws calendar +agenda --week --format table
 gws calendar +agenda --days 3 --calendar 'Work'
 gws calendar +agenda --today --timezone America/New_York
+gws calendar +agenda --days 2 --all-profiles
 ```
 
 ## Tips
