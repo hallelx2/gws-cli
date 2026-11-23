@@ -14,10 +14,10 @@ Based on upstream `main` at `cd3697e` (30 Oct 2026, released as v0.22.5).
 | Gmail `+read <query>` and `+code` | Read the newest matching mails as plain text in one command; pull a one-time code straight into a shell variable | `feat/gmail-read-code` | [#992](https://github.com/googleworkspace/cli/pull/992) |
 | Drive `+path`, `+sync`; Docs `+export`, Markdown `+write` | Resolve Drive paths to ids; mirror a local folder to Drive with stable ids (replaces hand-written sync scripts and drive.json maps); move documents between Markdown and Google Docs | `feat/drive-docs-helpers` | [#994](https://github.com/googleworkspace/cli/pull/994) |
 | Meet `+recent`, `+attendees`, `+transcript`, `+notes`, `+recording`, `+new` | After a call, pull its attendees, transcript, Gemini notes and recording in one command each; list recent meetings with their Calendar titles; make a meeting link with a Calendar event | `feat/meet-helpers` | [#993](https://github.com/googleworkspace/cli/pull/993) |
-| Search Console and Analytics `+report`, `+properties` | One-command search performance and GA4 reports as a table, CSV or JSON, with a clear "no data in range" line | `feat/report-helpers` (on `feat/ordered-report-output`) | PR pending |
-| YouTube `+upload`, `+videos` | Resumable upload with progress, private by default, thumbnail and playlist; list your recent uploads with stats | `feat/youtube-helpers` | PR pending |
-| Forms `+responses` | One row per response, question titles as headers, `--since` | `feat/forms-responses` | PR pending |
-| Calendar Meet links, `+free`, `--all-profiles` | `+agenda` shows the Meet link; `+free` finds open slots in working hours; both can merge every signed-in profile | `feat/calendar-agenda-free`, `feat/calendar-all-profiles` | PR pending (`--all-profiles` waits on #989) |
+| Search Console and Analytics `+report`, `+properties` | One-command search performance and GA4 reports as a table, CSV or JSON, with a clear "no data in range" line | `feat/report-helpers` (on `feat/ordered-report-output`) | [#995](https://github.com/googleworkspace/cli/pull/995) |
+| YouTube `+upload`, `+videos` | Resumable upload with progress, private by default, thumbnail and playlist; list your recent uploads with stats | `feat/youtube-helpers` | [#996](https://github.com/googleworkspace/cli/pull/996) |
+| Forms `+responses` | One row per response, question titles as headers, `--since` | `feat/forms-responses` | [#997](https://github.com/googleworkspace/cli/pull/997) |
+| Calendar Meet links, `+free`, `--all-profiles` | `+agenda` shows the Meet link; `+free` finds open slots in working hours; both can merge every signed-in profile | `feat/calendar-agenda-free`, `feat/calendar-all-profiles` | [#998](https://github.com/googleworkspace/cli/pull/998); `--all-profiles` stays fork-only until #989 |
 
 ## 1. Unlisted APIs: `<api>:<version>`
 
