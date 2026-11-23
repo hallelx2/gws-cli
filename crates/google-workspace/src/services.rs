@@ -148,6 +148,12 @@ pub const SERVICES: &[ServiceEntry] = &[
         version: "v1beta",
         description: "Google Analytics 4 reports and audience data",
     },
+    ServiceEntry {
+        aliases: &["youtube"],
+        api_name: "youtube",
+        version: "v3",
+        description: "Upload and manage YouTube videos, playlists and channels",
+    },
 ];
 
 /// Splits a service spec of the form `<service>` or `<service>:<version>`.
@@ -243,6 +249,14 @@ mod tests {
         assert_eq!(
             resolve_service("analytics").unwrap(),
             ("analyticsdata".to_string(), "v1beta".to_string())
+        );
+    }
+
+    #[test]
+    fn test_resolve_service_youtube() {
+        assert_eq!(
+            resolve_service("youtube").unwrap(),
+            ("youtube".to_string(), "v3".to_string())
         );
     }
 

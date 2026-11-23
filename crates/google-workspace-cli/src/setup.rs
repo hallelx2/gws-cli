@@ -184,6 +184,12 @@ const WORKSPACE_APIS: &[ApiEntry] = &[
         version: "v1beta",
     },
     ApiEntry {
+        id: "youtube.googleapis.com",
+        name: "YouTube Data API v3",
+        discovery: "youtube",
+        version: "v3",
+    },
+    ApiEntry {
         id: "pubsub.googleapis.com",
         name: "Cloud Pub/Sub",
         discovery: "pubsub",

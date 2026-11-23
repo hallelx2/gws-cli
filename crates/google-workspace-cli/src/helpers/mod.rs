@@ -28,6 +28,7 @@ pub mod script;
 pub mod searchconsole;
 pub mod sheets;
 pub mod workflows;
+pub mod youtube;
 
 /// Base URL for the Google Cloud Pub/Sub v1 API.
 ///
@@ -127,6 +128,7 @@ pub fn get_helper(service: &str) -> Option<Box<dyn Helper>> {
         "workflow" => Some(Box::new(workflows::WorkflowHelper)),
         "searchconsole" => Some(Box::new(searchconsole::SearchConsoleHelper)),
         "analyticsdata" => Some(Box::new(analytics::AnalyticsHelper)),
+        "youtube" => Some(Box::new(youtube::YouTubeHelper)),
         _ => None,
     }
 }
