@@ -198,9 +198,15 @@ async fn run() -> Result<(), GwsError> {
 
     // Resolve --format flag (after helper dispatch: some helpers, like
     // `docs +export --format md`, give it their own meaning)
+    let helper_formats = helpers::get_helper(&doc.name)
+        .map(|h| h.extra_formats())
+        .unwrap_or_default();
     let output_format = match matches.get_one::<String>("format") {
         Some(s) => match formatter::OutputFormat::parse(s) {
             Ok(fmt) => fmt,
+            Err(unknown) if is_helper_format(&unknown, helper_formats) => {
+                formatter::OutputFormat::Json
+            }
             Err(unknown) => {
                 eprintln!(
                     "warning: unknown output format '{unknown}'; falling back to json (valid options: json, table, yaml, csv)"
@@ -345,6 +351,12 @@ pub fn parse_service_and_version(
     }
 
     services::resolve_service_with_version(service_arg, version_override.as_deref())
+}
+
+/// True when `--format <value>` is not a shared format but one the service's
+/// helpers handle themselves (see `Helper::extra_formats`).
+fn is_helper_format(value: &str, helper_formats: &[&str]) -> bool {
+    helper_formats.iter().any(|f| f.eq_ignore_ascii_case(value))
 }
 
 pub fn filter_args_for_subcommand(args: &[String], service_name: &str) -> Vec<String> {
@@ -527,6 +539,15 @@ fn is_version_flag(arg: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn helper_formats_are_not_unknown() {
+        assert!(is_helper_format("text", &["text"]));
+        assert!(is_helper_format("TEXT", &["text"]));
+        assert!(!is_helper_format("text", &[]));
+        assert!(!is_helper_format("xml", &["text"]));
+    }
+
     use super::*;
 
     fn argv(parts: &[&str]) -> Vec<String> {
