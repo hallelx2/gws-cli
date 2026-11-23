@@ -13,6 +13,7 @@ Based on upstream `main` at `cd3697e` (30 Oct 2026, released as v0.22.5).
 | Token cache tied to the credential | A new login (new scopes or another account) never reuses an old access token | `fix/780-token-cache-invalidation` | [#991](https://github.com/googleworkspace/cli/pull/991) (fixes [#780](https://github.com/googleworkspace/cli/issues/780), [#572](https://github.com/googleworkspace/cli/issues/572)) |
 | Gmail `+read <query>` and `+code` | Read the newest matching mails as plain text in one command; pull a one-time code straight into a shell variable | `feat/gmail-read-code` | [#992](https://github.com/googleworkspace/cli/pull/992) |
 | Drive `+path`, `+sync`; Docs `+export`, Markdown `+write` | Resolve Drive paths to ids; mirror a local folder to Drive with stable ids (replaces hand-written sync scripts and drive.json maps); move documents between Markdown and Google Docs | `feat/drive-docs-helpers` | PR pending |
+| Meet `+recent`, `+attendees`, `+transcript`, `+notes`, `+recording`, `+new` | After a call, pull its attendees, transcript, Gemini notes and recording in one command each; list recent meetings with their Calendar titles; make a meeting link with a Calendar event | `feat/meet-helpers` | [#993](https://github.com/googleworkspace/cli/pull/993) |
 
 ## 1. Unlisted APIs: `<api>:<version>`
 
@@ -117,6 +118,32 @@ Verified live on 2026-11-23: a re-sync after editing one file kept that file's i
 
 Code: `crates/google-workspace-cli/src/helpers/drive/{api,path,sync}.rs`, `helpers/docs/{export,write,json_to_md}.rs`.
 
+## 6. Google Meet: `+recent`, `+attendees`, `+transcript`, `+notes`, `+recording`, `+new`
+
+After a call, one command each pulls what happened in it. The helpers join the Meet REST API v2 with Calendar (event titles, notes attachments) and Drive (Doc exports, recording files). Every helper takes a conference record (`conferenceRecords/ID`), a meeting code (`abc-defg-hij`), a pasted Meet link, or `latest`.
+
+```bash
+gws meet +recent                              # last 7 days: start, duration, code, Calendar title, head count
+gws meet +recent --days 30 --limit 5 --format json
+gws meet +attendees latest                    # name, signed-in/anonymous/phone, first join, last leave, total time
+gws meet +transcript latest                   # "[00:12:31] Ada: …" speaker-labelled text
+gws meet +transcript abc-defg-hij --format json
+gws meet +notes latest                        # Gemini "Take notes for me" notes as text
+gws meet +recording latest --download recordings
+gws meet +new --title 'Design review' --minutes 45   # link + Calendar event holding it
+gws --profile bachs meet +recent              # works with any profile
+```
+
+- When a meeting has no transcript, notes or recording, the helper says so and exits 1 (`notFound`). It never prints an empty success.
+- `+transcript` reads `transcripts.entries` and resolves speakers through the participant list. When the API has no entries, it exports the transcript Doc instead.
+- `+notes` reads Meet smart notes first. If there are none, it falls back to the Gemini notes Doc attached to the Calendar event.
+- `+recording --download` takes a relative directory inside the current one. It names files after the Drive file and adds the missing `.mp4`. It skips files already downloaded at full size, and an interrupted download resumes from its `.part` file.
+- Listing helpers default to `--format table`. `+transcript` and `+notes` default to plain text (`--format text`), and `--format json` gives structured output.
+- Event titles come from the primary calendar. A meeting nobody put on your calendar has no title.
+- Needed scopes: `meetings.space.readonly` (plus `meetings.space.created` for `+new`), `calendar`, `drive`.
+
+Code: `crates/google-workspace-cli/src/helpers/meet/`.
+
 ## Building and installing
 
 ```bash
@@ -135,7 +162,7 @@ It uses the same config dir and keyring as the upstream binary, so an existing l
 git fetch origin                     # origin = googleworkspace/cli
 git checkout hallelx2-main
 git merge origin/main                # then re-merge any branch that changed:
-git merge fix/670-unlisted-api-version feat/auth-profiles fix/780-token-cache-invalidation feat/gmail-read-code feat/drive-docs-helpers
+git merge fix/670-unlisted-api-version feat/auth-profiles fix/780-token-cache-invalidation feat/gmail-read-code feat/drive-docs-helpers feat/meet-helpers
 cargo test && cargo build --release
 ```
 
