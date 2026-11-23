@@ -356,6 +356,25 @@ pub(crate) fn service_account_token_cache_path() -> PathBuf {
     crate::profile::profile_dir().join("sa_token_cache.json")
 }
 
+/// Removes the given token cache files, ignoring ones that do not exist.
+/// Returns the paths that were removed. A file that cannot be removed only
+/// produces a warning: cached entries are also bound to the credential that
+/// minted them, so a leftover cache is ignored rather than reused.
+fn clear_token_caches(paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut removed = Vec::new();
+    for path in paths {
+        match std::fs::remove_file(path) {
+            Ok(()) => removed.push(path.clone()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => eprintln!(
+                "warning: failed to remove token cache {}: {e}",
+                path.display()
+            ),
+        }
+    }
+    removed
+}
+
 /// Which scope set to use for login.
 enum ScopeMode {
     /// Use the default scopes (MINIMAL_SCOPES).
@@ -694,9 +713,11 @@ async fn handle_login_inner(
     let enc_path = credential_store::save_encrypted(&creds_str)
         .map_err(|e| GwsError::Auth(format!("Failed to encrypt credentials: {e}")))?;
 
-    for path in [token_cache_path(), service_account_token_cache_path()] {
-        let _ = std::fs::remove_file(path);
-    }
+    // Cached access tokens (and the refresh tokens yup-oauth2 stores beside
+    // them) belong to the previous login: another account, or the same
+    // account under the old scopes. Drop them so the next call mints a token
+    // from the credentials just saved (#780, #572).
+    clear_token_caches(&[token_cache_path(), service_account_token_cache_path()]);
     crate::timezone::invalidate_cache();
 
     let output = json!({
@@ -2136,6 +2157,32 @@ mod tests {
         assert_eq!(named_path, dir.join("credentials.json"));
         // Unchanged behavior for the default profile.
         assert_eq!(default_path, PathBuf::from("/elsewhere/creds.json"));
+    }
+
+    #[test]
+    fn clear_token_caches_removes_existing_and_skips_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("token_cache.json");
+        let sa_cache = dir.path().join("sa_token_cache.json");
+        std::fs::write(&cache, b"stale").unwrap();
+
+        let removed = clear_token_caches(&[cache.clone(), sa_cache.clone()]);
+
+        assert_eq!(removed, vec![cache.clone()]);
+        assert!(!cache.exists());
+        assert!(!sa_cache.exists());
+        // Idempotent.
+        assert!(clear_token_caches(&[cache, sa_cache]).is_empty());
+    }
+
+    #[test]
+    fn token_cache_paths_live_in_profile_dir() {
+        let dir = crate::profile::profile_dir();
+        assert_eq!(token_cache_path(), dir.join("token_cache.json"));
+        assert_eq!(
+            service_account_token_cache_path(),
+            dir.join("sa_token_cache.json")
+        );
     }
 
     #[tokio::test]
