@@ -22,6 +22,7 @@ pub mod chat;
 pub mod docs;
 pub mod drive;
 pub mod events;
+pub mod forms;
 pub mod gmail;
 pub mod modelarmor;
 pub mod script;
@@ -129,6 +130,7 @@ pub fn get_helper(service: &str) -> Option<Box<dyn Helper>> {
         "searchconsole" => Some(Box::new(searchconsole::SearchConsoleHelper)),
         "analyticsdata" => Some(Box::new(analytics::AnalyticsHelper)),
         "youtube" => Some(Box::new(youtube::YouTubeHelper)),
+        "forms" => Some(Box::new(forms::FormsHelper)),
         _ => None,
     }
 }
