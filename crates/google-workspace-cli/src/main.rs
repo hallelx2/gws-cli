@@ -571,8 +571,8 @@ mod tests {
 
     #[test]
     fn test_parse_service_and_version_unlisted_without_version_errors() {
-        let args = argv(&["gws", "searchconsole", "sites", "list"]);
-        assert!(parse_service_and_version(&args, "searchconsole").is_err());
+        let args = argv(&["gws", "pagespeedonline", "pagespeedapi", "runpagespeed"]);
+        assert!(parse_service_and_version(&args, "pagespeedonline").is_err());
     }
 
     #[test]

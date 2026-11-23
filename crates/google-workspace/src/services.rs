@@ -311,9 +311,9 @@ mod tests {
 
     #[test]
     fn test_resolve_service_unlisted_without_version_errors() {
-        match resolve_service("searchconsole").unwrap_err() {
+        match resolve_service("pagespeedonline").unwrap_err() {
             GwsError::Validation(msg) => {
-                assert!(msg.contains("Unknown service 'searchconsole'"));
+                assert!(msg.contains("Unknown service 'pagespeedonline'"));
                 assert!(msg.contains("<api>:<version>"));
             }
             _ => panic!("Expected Validation error"),
