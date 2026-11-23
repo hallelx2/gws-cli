@@ -218,6 +218,7 @@ gws --profile work drive files list  # use it
 export GOOGLE_WORKSPACE_CLI_PROFILE=work
 gws auth status                      # shows "profile": "work" and its "profile_dir"
 gws --profile work auth logout       # only removes the "work" profile's files
+gws auth profiles                    # list profiles, which is active, which are signed in
 ```
 
 - **Selection:** `--profile NAME` (a global flag, accepted anywhere before a

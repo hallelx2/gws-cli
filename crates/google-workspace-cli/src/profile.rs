@@ -329,6 +329,82 @@ pub fn profile_dir() -> PathBuf {
     profile_dir_for(&crate::auth_commands::config_dir(), &active().name)
 }
 
+/// Where a profile's OAuth client config comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientConfigSource {
+    /// The profile has its own `client_secret.json`.
+    Own,
+    /// The profile falls back to the shared `client_secret.json`.
+    Shared,
+    /// No client config is available to the profile.
+    None,
+}
+
+impl ClientConfigSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Own => "own",
+            Self::Shared => "shared",
+            Self::None => "none",
+        }
+    }
+}
+
+/// A profile found on disk, as listed by `gws auth profiles`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileEntry {
+    pub name: String,
+    pub dir: PathBuf,
+    /// Whether the profile holds saved credentials (`credentials.enc` or
+    /// `credentials.json`). This is a file check; it does not contact Google.
+    pub has_credentials: bool,
+    pub client_config: ClientConfigSource,
+}
+
+fn profile_entry(base: &Path, name: &str) -> ProfileEntry {
+    let dir = profile_dir_for(base, name);
+    let has_credentials =
+        dir.join("credentials.enc").is_file() || dir.join("credentials.json").is_file();
+    let own = dir.join(CLIENT_CONFIG_FILE);
+    // For `default`, its own file is the shared file, so it reports `own`.
+    let client_config = if own.is_file() {
+        ClientConfigSource::Own
+    } else if base.join(CLIENT_CONFIG_FILE).is_file() {
+        ClientConfigSource::Shared
+    } else {
+        ClientConfigSource::None
+    };
+    ProfileEntry {
+        name: name.to_string(),
+        dir,
+        has_credentials,
+        client_config,
+    }
+}
+
+/// Lists the profiles under `base`: `default` first, then every directory in
+/// `<base>/profiles/` whose name is a valid profile name, sorted by name.
+/// Entries with invalid names (which `--profile` could never select) are
+/// skipped.
+pub fn list_profiles(base: &Path) -> Vec<ProfileEntry> {
+    let mut names: Vec<String> = std::fs::read_dir(base.join(PROFILES_SUBDIR))
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                .filter_map(|e| e.file_name().into_string().ok())
+                .filter(|name| name != DEFAULT_PROFILE && validate_profile_name(name).is_ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+
+    std::iter::once(DEFAULT_PROFILE.to_string())
+        .chain(names)
+        .map(|name| profile_entry(base, &name))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -714,5 +790,54 @@ mod tests {
         // The global is never set in unit tests.
         assert!(active().is_default());
         assert_eq!(profile_dir(), crate::auth_commands::config_dir());
+    }
+
+    #[test]
+    fn list_profiles_default_only_when_no_profiles_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let listed = list_profiles(tmp.path());
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "default");
+        assert_eq!(listed[0].dir, tmp.path());
+        assert!(!listed[0].has_credentials);
+        assert_eq!(listed[0].client_config, ClientConfigSource::None);
+    }
+
+    #[test]
+    fn list_profiles_reports_credentials_and_client_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        std::fs::write(base.join("credentials.enc"), b"x").unwrap();
+        std::fs::write(base.join(CLIENT_CONFIG_FILE), b"{}").unwrap();
+
+        let profiles = base.join(PROFILES_SUBDIR);
+        // Signed in, own client.
+        std::fs::create_dir_all(profiles.join("work")).unwrap();
+        std::fs::write(profiles.join("work").join("credentials.enc"), b"x").unwrap();
+        std::fs::write(profiles.join("work").join(CLIENT_CONFIG_FILE), b"{}").unwrap();
+        // Not signed in, shared client.
+        std::fs::create_dir_all(profiles.join("home")).unwrap();
+        // Plaintext credentials count as signed in.
+        std::fs::create_dir_all(profiles.join("ci")).unwrap();
+        std::fs::write(profiles.join("ci").join("credentials.json"), b"{}").unwrap();
+        // Skipped: invalid names, a stray file, and a nested "default".
+        std::fs::create_dir_all(profiles.join("Bad-Name")).unwrap();
+        std::fs::create_dir_all(profiles.join("con")).unwrap();
+        std::fs::create_dir_all(profiles.join("default")).unwrap();
+        std::fs::write(profiles.join("notes"), b"").unwrap();
+
+        let listed = list_profiles(base);
+        let names: Vec<&str> = listed.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["default", "ci", "home", "work"]);
+
+        let get = |name: &str| listed.iter().find(|p| p.name == name).unwrap();
+        assert!(get("default").has_credentials);
+        assert_eq!(get("default").client_config, ClientConfigSource::Own);
+        assert!(get("ci").has_credentials);
+        assert!(!get("home").has_credentials);
+        assert_eq!(get("home").client_config, ClientConfigSource::Shared);
+        assert_eq!(get("home").dir, profiles.join("home"));
+        assert!(get("work").has_credentials);
+        assert_eq!(get("work").client_config, ClientConfigSource::Own);
     }
 }

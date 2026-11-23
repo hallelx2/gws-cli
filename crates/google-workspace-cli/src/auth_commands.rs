@@ -437,6 +437,10 @@ fn auth_command() -> clap::Command {
                 ),
         )
         .subcommand(clap::Command::new("logout").about("Clear saved credentials and token cache"))
+        .subcommand(
+            clap::Command::new("profiles")
+                .about("List auth profiles and whether each one is signed in"),
+        )
 }
 
 /// Handle `gws auth <subcommand>`.
@@ -477,6 +481,7 @@ pub async fn handle_auth_command(args: &[String]) -> Result<(), GwsError> {
             handle_export(unmasked).await
         }
         Some(("logout", _)) => handle_logout(),
+        Some(("profiles", _)) => handle_profiles(),
         _ => {
             // No subcommand → print help
             auth_command()
@@ -1507,6 +1512,37 @@ async fn handle_status() -> Result<(), GwsError> {
     Ok(())
 }
 
+/// Builds the `gws auth profiles` output for the profiles under `base`.
+fn profiles_output(base: &Path, active: &str) -> serde_json::Value {
+    let profiles: Vec<serde_json::Value> = crate::profile::list_profiles(base)
+        .into_iter()
+        .map(|p| {
+            json!({
+                "name": p.name,
+                "active": p.name == active,
+                "signed_in": p.has_credentials,
+                "client_config": p.client_config.as_str(),
+                "dir": p.dir.display().to_string(),
+            })
+        })
+        .collect();
+    json!({
+        "active": active,
+        "config_dir": base.display().to_string(),
+        "profiles": profiles,
+    })
+}
+
+/// Handle `gws auth profiles`: list profiles without contacting Google.
+fn handle_profiles() -> Result<(), GwsError> {
+    let output = profiles_output(&config_dir(), &crate::profile::active().name);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&output).unwrap_or_default()
+    );
+    Ok(())
+}
+
 /// Plaintext credentials file removed by `auth logout`. A named profile only
 /// ever removes files from its own directory, never a
 /// `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE` that happens to be set.
@@ -1969,6 +2005,35 @@ mod tests {
         let path = token_cache_path();
         assert!(path.ends_with("token_cache.json"));
         assert!(path.starts_with(config_dir()));
+    }
+
+    #[test]
+    fn profiles_output_marks_active_profile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let work = base.join("profiles").join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::write(work.join("credentials.enc"), b"x").unwrap();
+
+        let out = profiles_output(base, "work");
+        assert_eq!(out["active"], "work");
+        assert_eq!(out["config_dir"], base.display().to_string());
+        let profiles = out["profiles"].as_array().unwrap();
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(profiles[0]["name"], "default");
+        assert_eq!(profiles[0]["active"], false);
+        assert_eq!(profiles[0]["signed_in"], false);
+        assert_eq!(profiles[0]["client_config"], "none");
+        assert_eq!(profiles[1]["name"], "work");
+        assert_eq!(profiles[1]["active"], true);
+        assert_eq!(profiles[1]["signed_in"], true);
+        assert_eq!(profiles[1]["dir"], work.display().to_string());
+    }
+
+    #[tokio::test]
+    async fn handle_auth_command_profiles_succeeds() {
+        let args = vec!["profiles".to_string()];
+        assert!(handle_auth_command(&args).await.is_ok());
     }
 
     #[test]
