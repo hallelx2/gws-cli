@@ -3,6 +3,9 @@
 **One CLI for all of Google Workspace — built for humans and AI agents.**<br>
 Drive, Gmail, Calendar, and every Workspace API. Zero boilerplate. Structured JSON output. 40+ agent skills included.
 
+> [!IMPORTANT]
+> **This is the `hallelx2/gws-cli` fork.** It adds `<api>:<version>` for unlisted APIs, named auth profiles and a token-cache fix on top of upstream. See [FORK.md](FORK.md) for every difference and its upstream PR.
+
 > [!NOTE]
 > This is **not** an officially supported Google product.
 
