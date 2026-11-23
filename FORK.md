@@ -12,6 +12,7 @@ Based on upstream `main` at `cd3697e` (30 Oct 2026, released as v0.22.5).
 | Named auth profiles | One `gws` for several Google accounts: `gws --profile work …` | `feat/auth-profiles` | [#989](https://github.com/googleworkspace/cli/pull/989) by @gfortaine, plus our `gws auth profiles` command |
 | Token cache tied to the credential | A new login (new scopes or another account) never reuses an old access token | `fix/780-token-cache-invalidation` | [#991](https://github.com/googleworkspace/cli/pull/991) (fixes [#780](https://github.com/googleworkspace/cli/issues/780), [#572](https://github.com/googleworkspace/cli/issues/572)) |
 | Gmail `+read <query>` and `+code` | Read the newest matching mails as plain text in one command; pull a one-time code straight into a shell variable | `feat/gmail-read-code` | PR pending |
+| Drive `+path`, `+sync`; Docs `+export`, Markdown `+write` | Resolve Drive paths to ids; mirror a local folder to Drive with stable ids (replaces hand-written sync scripts and drive.json maps); move documents between Markdown and Google Docs | `feat/drive-docs-helpers` | PR pending |
 
 ## 1. Unlisted APIs: `<api>:<version>`
 
@@ -88,6 +89,34 @@ gws --profile bachs gmail +code 'from:hello@example.com'
 
 Code: `crates/google-workspace-cli/src/helpers/gmail/read.rs`, `code.rs`, `html_text.rs`; shared search and fetch helpers in `gmail/mod.rs`.
 
+## 5. Drive and Docs: `+path`, `+sync`, `+export`, Markdown `+write`
+
+Syncing posters, decks and PDFs to Drive meant a Python script per repo that listed folders, compared checksums, picked `files.create` or `files.update`, and kept a drive.json of ids by hand. Moving a plan between Markdown and Google Docs meant copy and paste. Four helpers replace both:
+
+```bash
+gws drive +path 'MBPrep Company/design/social'           # → id; lists the ids if two items share a name
+gws drive +path 'Shared drives/Engineering/specs' --create  # makes missing folders
+
+gws drive +sync ./out 'MBPrep Company/design/social/launch' --ids drive.json
+gws drive +sync ./out FOLDER_ID --dry-run --delete        # show what would change, change nothing
+gws --profile bachs drive +sync ./deck 'Decks/2026'
+
+gws docs +write plan.md --new 'Q1 plan' --folder 'MBPrep Company/strategy'
+gws docs +write plan.md --doc 'MBPrep Company/strategy/Q1 plan'   # replace the body in place
+gws docs +export 'MBPrep Company/strategy/Q1 plan' --output plan.md
+gws docs +export DOC_URL --format txt                     # or html
+```
+
+- **Paths.** `a/b/c`, `/a/b/c` and `My Drive/a/b/c` start at My Drive; `Shared drives/<name>/…` starts at a shared drive. Write a slash inside a name as `\/`. Anywhere a folder or doc is expected, an id, a Drive or Docs URL, or `id:<ID>` also works. Resolution goes one folder name at a time and never guesses between items that share a name.
+- **`+sync`** builds the whole plan before touching Drive. If two remote items share a name, a file sits where a folder should be, or a Google Doc has a local file's name, it lists every such path and changes nothing. New files are uploaded; files whose size or MD5 differ are updated in place with `files.update`, so ids and share links stay. `--delete` moves extra items to the trash, never permanently, and leaves Google Docs, Sheets and Slides alone. `--ids` writes `{"root", "folders": {path: id}, "files": {path: id}}`. Subdirectories sync recursively; `.DS_Store`, `Thumbs.db`, `desktop.ini` and `.git` are skipped, symlinks are not followed, `--exclude GLOB` skips more. Uploads run four at a time, with retries on rate limits, 5xx and dropped connections, and resumable uploads above 5 MB.
+- **`+write`** goes through Drive's own Markdown import, so headings, nested lists, bold, italic, strikethrough, links, code (monospace), tables and images become real formatting. `--doc` replaces the body of an existing Doc and keeps its id, link, sharing and history. Local images are embedded; remote image URLs must be public. `--document ID --text '…'` still appends plain text as before.
+- **`+export`** uses Drive's export. Its Markdown embeds images as base64; here they become links instead, to files saved in `<name>_images/` next to `--output`, or on stdout to the Docs image URLs (which expire). Drive's needless escapes (`a\_b`), list-item line breaks and `:----` table rules are tidied, and the text export loses its BOM and CRLFs. A document over Drive's 10 MB export limit is converted from the Docs API JSON instead.
+- All four honour `--profile` and `--dry-run`. The local directory, `--output` and `--ids` must lie under the current directory.
+
+Verified live on 2026-11-23: a re-sync after editing one file kept that file's id and served the new content; `--dry-run --delete` then `--delete` trashed exactly the file removed locally; a duplicate remote name stopped both `+sync` and `+path`. A Markdown file with headings, nested and numbered lists, a table, a code block, a quote and a local image went through `+write --new` and back through `+export`. The only differences were Drive's `python` → `py` fence label and the image path.
+
+Code: `crates/google-workspace-cli/src/helpers/drive/{api,path,sync}.rs`, `helpers/docs/{export,write,json_to_md}.rs`.
+
 ## Building and installing
 
 ```bash
@@ -106,7 +135,7 @@ It uses the same config dir and keyring as the upstream binary, so an existing l
 git fetch origin                     # origin = googleworkspace/cli
 git checkout hallelx2-main
 git merge origin/main                # then re-merge any branch that changed:
-git merge fix/670-unlisted-api-version feat/auth-profiles fix/780-token-cache-invalidation feat/gmail-read-code
+git merge fix/670-unlisted-api-version feat/auth-profiles fix/780-token-cache-invalidation feat/gmail-read-code feat/drive-docs-helpers
 cargo test && cargo build --release
 ```
 
