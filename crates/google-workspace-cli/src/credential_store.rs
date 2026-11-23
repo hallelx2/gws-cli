@@ -410,7 +410,9 @@ pub fn decrypt(data: &[u8]) -> anyhow::Result<Vec<u8>> {
     let plaintext = cipher.decrypt(nonce, &data[12..]).map_err(|_| {
         anyhow::anyhow!(
             "Decryption failed. Credentials may have been created on a different machine. \
-                 Run `gws auth logout` and `gws auth login` to re-authenticate."
+                 Run `{}` and `{}` to re-authenticate.",
+            crate::profile::auth_command("logout"),
+            crate::profile::auth_command("login")
         )
     })?;
 
@@ -424,7 +426,7 @@ pub fn active_backend_name() -> &'static str {
 
 /// Returns the path for encrypted credentials.
 pub fn encrypted_credentials_path() -> PathBuf {
-    crate::auth_commands::config_dir().join("credentials.enc")
+    crate::profile::profile_dir().join("credentials.enc")
 }
 
 /// Saves credentials JSON to an encrypted file.

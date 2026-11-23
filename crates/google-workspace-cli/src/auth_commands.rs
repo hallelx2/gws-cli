@@ -178,8 +178,15 @@ fn read_refresh_token_from_cache(temp_path: &Path) -> Result<String, GwsError> {
     })
 }
 
+/// Temporary token cache written during `auth login`. It holds the new refresh
+/// token, so it lives in the profile's own directory: concurrent logins for
+/// different profiles must never share (or delete) each other's file.
+fn login_temp_credentials_path(profile_dir: &Path) -> PathBuf {
+    profile_dir.join("credentials.tmp")
+}
+
 async fn login_with_yup_oauth(
-    config_dir: &Path,
+    profile_dir: &Path,
     client_id: &str,
     client_secret: &str,
     scopes: &[String],
@@ -193,7 +200,7 @@ async fn login_with_yup_oauth(
         ..Default::default()
     };
 
-    let temp_path = config_dir.join("credentials.tmp");
+    let temp_path = login_temp_credentials_path(profile_dir);
     let _ = std::fs::remove_file(&temp_path);
 
     let result = async {
@@ -334,15 +341,19 @@ pub fn config_dir() -> PathBuf {
     primary
 }
 
-fn plain_credentials_path() -> PathBuf {
+pub(crate) fn plain_credentials_path() -> PathBuf {
     if let Ok(path) = std::env::var("GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE") {
         return PathBuf::from(path);
     }
-    config_dir().join("credentials.json")
+    crate::profile::profile_dir().join("credentials.json")
 }
 
-fn token_cache_path() -> PathBuf {
-    config_dir().join("token_cache.json")
+pub(crate) fn token_cache_path() -> PathBuf {
+    crate::profile::profile_dir().join("token_cache.json")
+}
+
+pub(crate) fn service_account_token_cache_path() -> PathBuf {
+    crate::profile::profile_dir().join("sa_token_cache.json")
 }
 
 /// Which scope set to use for login.
@@ -426,6 +437,10 @@ fn auth_command() -> clap::Command {
                 ),
         )
         .subcommand(clap::Command::new("logout").about("Clear saved credentials and token cache"))
+        .subcommand(
+            clap::Command::new("profiles")
+                .about("List auth profiles and whether each one is signed in"),
+        )
 }
 
 /// Handle `gws auth <subcommand>`.
@@ -466,6 +481,7 @@ pub async fn handle_auth_command(args: &[String]) -> Result<(), GwsError> {
             handle_export(unmasked).await
         }
         Some(("logout", _)) => handle_logout(),
+        Some(("profiles", _)) => handle_profiles(),
         _ => {
             // No subcommand → print help
             auth_command()
@@ -572,6 +588,30 @@ impl yup_oauth2::authenticator_delegate::InstalledFlowDelegate for CliFlowDelega
     }
 }
 
+/// Decides whether `auth login` persists the OAuth client it used to the
+/// active profile's own client config (`own_path`).
+///
+/// - No client config at the resolved path: save (as before profiles existed).
+/// - Default profile, or a named profile with its own file: never overwrite.
+/// - Named profile falling back to the shared file: save only when the client
+///   used (e.g. from `GOOGLE_WORKSPACE_CLI_CLIENT_ID`) differs from the shared
+///   one, so a different organization's client sticks to this profile.
+fn should_persist_login_client(
+    is_default_profile: bool,
+    own_path: &Path,
+    resolved_path: &Path,
+    resolved_client_id: Option<&str>,
+    client_id: &str,
+) -> bool {
+    if !resolved_path.exists() {
+        return true;
+    }
+    if is_default_profile || own_path.exists() {
+        return false;
+    }
+    resolved_client_id != Some(client_id)
+}
+
 /// Inner login implementation that takes already-parsed options.
 async fn handle_login_inner(
     scope_mode: ScopeMode,
@@ -582,13 +622,23 @@ async fn handle_login_inner(
     // 2. Saved client_secret.json from `gws auth setup` or manual download
     let (client_id, client_secret, project_id) = resolve_client_credentials()?;
 
-    // Persist credentials to client_secret.json if not already saved,
-    // so they survive env var removal or shell session changes.
-    if !crate::oauth_config::client_config_path().exists() {
+    // Persist the client to client_secret.json so it survives env var removal
+    // or shell session changes (see `should_persist_login_client`).
+    let resolved_client = crate::oauth_config::load_client_config().ok();
+    let resolved_client_id = resolved_client.as_ref().map(|c| c.client_id.as_str());
+    if should_persist_login_client(
+        crate::profile::active().is_default(),
+        &crate::oauth_config::client_config_path(),
+        &crate::oauth_config::resolved_client_config_path(),
+        resolved_client_id,
+        &client_id,
+    ) {
+        // The resolved config's project only belongs to this client if the IDs match.
+        let same_client = resolved_client_id == Some(client_id.as_str());
         let _ = crate::oauth_config::save_client_config(
             &client_id,
             &client_secret,
-            project_id.as_deref().unwrap_or(""),
+            project_id.as_deref().filter(|_| same_client).unwrap_or(""),
         );
     }
 
@@ -613,9 +663,9 @@ async fn handle_login_inner(
         }
     }
 
-    // Ensure config directory exists
-    let config = config_dir();
-    std::fs::create_dir_all(&config)
+    // Ensure the profile directory exists
+    let profile_dir = crate::profile::profile_dir();
+    std::fs::create_dir_all(&profile_dir)
         .map_err(|e| GwsError::Validation(format!("Failed to create config directory: {e}")))?;
 
     // If proxy env vars are set, use proxy-aware OAuth flow (reqwest)
@@ -623,7 +673,7 @@ async fn handle_login_inner(
     let (access_token, refresh_token) = if crate::auth::has_proxy_env() {
         login_with_proxy_support(&client_id, &client_secret, &scopes).await?
     } else {
-        login_with_yup_oauth(&config, &client_id, &client_secret, &scopes).await?
+        login_with_yup_oauth(&profile_dir, &client_id, &client_secret, &scopes).await?
     };
 
     // Build credentials in the standard authorized_user format
@@ -644,9 +694,15 @@ async fn handle_login_inner(
     let enc_path = credential_store::save_encrypted(&creds_str)
         .map_err(|e| GwsError::Auth(format!("Failed to encrypt credentials: {e}")))?;
 
+    for path in [token_cache_path(), service_account_token_cache_path()] {
+        let _ = std::fs::remove_file(path);
+    }
+    crate::timezone::invalidate_cache();
+
     let output = json!({
         "status": "success",
         "message": "Authentication successful. Encrypted credentials saved.",
+        "profile": crate::profile::active().name,
         "account": actual_email.as_deref().unwrap_or("(unknown)"),
         "credentials_file": enc_path.display().to_string(),
         "encryption": "AES-256-GCM (key in OS keyring or local `.encryption_key`; set GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file for headless)",
@@ -683,9 +739,10 @@ async fn fetch_userinfo_email(access_token: &str) -> Option<String> {
 async fn handle_export(unmasked: bool) -> Result<(), GwsError> {
     let enc_path = credential_store::encrypted_credentials_path();
     if !enc_path.exists() {
-        return Err(GwsError::Auth(
-            "No encrypted credentials found. Run 'gws auth login' first.".to_string(),
-        ));
+        return Err(GwsError::Auth(format!(
+            "No encrypted credentials found. Run '{}' first.",
+            crate::profile::auth_command("login")
+        )));
     }
 
     match credential_store::load_encrypted() {
@@ -743,7 +800,7 @@ fn resolve_client_credentials() -> Result<(String, String, Option<String>), GwsE
                    2. Download client_secret.json from Google Cloud Console and save it to:\n     \
                       {}\n  \
                    3. Set env vars: GOOGLE_WORKSPACE_CLI_CLIENT_ID and GOOGLE_WORKSPACE_CLI_CLIENT_SECRET",
-                crate::oauth_config::client_config_path().display()
+                crate::oauth_config::resolved_client_config_path().display()
             ),
         )),
     }
@@ -1223,6 +1280,8 @@ async fn handle_status() -> Result<(), GwsError> {
     };
 
     let mut output = json!({
+        "profile": crate::profile::active().name,
+        "profile_dir": crate::profile::profile_dir().display().to_string(),
         "auth_method": auth_method,
         "storage": storage,
         "keyring_backend": credential_store::active_backend_name(),
@@ -1234,7 +1293,7 @@ async fn handle_status() -> Result<(), GwsError> {
     });
 
     // Show client config (client_secret.json) status
-    let config_path = crate::oauth_config::client_config_path();
+    let config_path = crate::oauth_config::resolved_client_config_path();
     let has_config = config_path.exists();
     output["client_config"] = json!(config_path.display().to_string());
     output["client_config_exists"] = json!(has_config);
@@ -1453,11 +1512,57 @@ async fn handle_status() -> Result<(), GwsError> {
     Ok(())
 }
 
+/// Builds the `gws auth profiles` output for the profiles under `base`.
+fn profiles_output(base: &Path, active: &str) -> serde_json::Value {
+    let profiles: Vec<serde_json::Value> = crate::profile::list_profiles(base)
+        .into_iter()
+        .map(|p| {
+            json!({
+                "name": p.name,
+                "active": p.name == active,
+                "signed_in": p.has_credentials,
+                "client_config": p.client_config.as_str(),
+                "dir": p.dir.display().to_string(),
+            })
+        })
+        .collect();
+    json!({
+        "active": active,
+        "config_dir": base.display().to_string(),
+        "profiles": profiles,
+    })
+}
+
+/// Handle `gws auth profiles`: list profiles without contacting Google.
+fn handle_profiles() -> Result<(), GwsError> {
+    let output = profiles_output(&config_dir(), &crate::profile::active().name);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&output).unwrap_or_default()
+    );
+    Ok(())
+}
+
+/// Plaintext credentials file removed by `auth logout`. A named profile only
+/// ever removes files from its own directory, never a
+/// `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE` that happens to be set.
+fn logout_plain_credentials_path(
+    profile: &crate::profile::ActiveProfile,
+    profile_dir: &Path,
+) -> PathBuf {
+    if profile.is_default() {
+        plain_credentials_path()
+    } else {
+        profile_dir.join("credentials.json")
+    }
+}
+
 fn handle_logout() -> Result<(), GwsError> {
-    let plain_path = plain_credentials_path();
+    let plain_path =
+        logout_plain_credentials_path(&crate::profile::active(), &crate::profile::profile_dir());
     let enc_path = credential_store::encrypted_credentials_path();
     let token_cache = token_cache_path();
-    let sa_token_cache = config_dir().join("sa_token_cache.json");
+    let sa_token_cache = service_account_token_cache_path();
 
     let mut removed = Vec::new();
 
@@ -1476,11 +1581,13 @@ fn handle_logout() -> Result<(), GwsError> {
     let output = if removed.is_empty() {
         json!({
             "status": "success",
+            "profile": crate::profile::active().name,
             "message": "No credentials found to remove.",
         })
     } else {
         json!({
             "status": "success",
+            "profile": crate::profile::active().name,
             "message": "Logged out. All credentials and token caches removed.",
             "removed": removed,
         })
@@ -1818,7 +1925,7 @@ mod tests {
         }
         // Result depends on whether client_secret.json exists on the machine
         let result = resolve_client_credentials();
-        if crate::oauth_config::client_config_path().exists() {
+        if crate::oauth_config::resolved_client_config_path().exists() {
             assert!(
                 result.is_ok(),
                 "Should succeed when client_secret.json exists"
@@ -1900,6 +2007,137 @@ mod tests {
         assert!(path.starts_with(config_dir()));
     }
 
+    #[test]
+    fn profiles_output_marks_active_profile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let work = base.join("profiles").join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::write(work.join("credentials.enc"), b"x").unwrap();
+
+        let out = profiles_output(base, "work");
+        assert_eq!(out["active"], "work");
+        assert_eq!(out["config_dir"], base.display().to_string());
+        let profiles = out["profiles"].as_array().unwrap();
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(profiles[0]["name"], "default");
+        assert_eq!(profiles[0]["active"], false);
+        assert_eq!(profiles[0]["signed_in"], false);
+        assert_eq!(profiles[0]["client_config"], "none");
+        assert_eq!(profiles[1]["name"], "work");
+        assert_eq!(profiles[1]["active"], true);
+        assert_eq!(profiles[1]["signed_in"], true);
+        assert_eq!(profiles[1]["dir"], work.display().to_string());
+    }
+
+    #[tokio::test]
+    async fn handle_auth_command_profiles_succeeds() {
+        let args = vec!["profiles".to_string()];
+        assert!(handle_auth_command(&args).await.is_ok());
+    }
+
+    #[test]
+    fn login_temp_credentials_path_is_per_profile() {
+        let base = Path::new("/cfg/gws");
+        let work = login_temp_credentials_path(&crate::profile::profile_dir_for(base, "work"));
+        let home = login_temp_credentials_path(&crate::profile::profile_dir_for(base, "home"));
+        assert_eq!(
+            work,
+            base.join("profiles").join("work").join("credentials.tmp")
+        );
+        assert_ne!(work, home);
+        assert_eq!(
+            login_temp_credentials_path(&crate::profile::profile_dir_for(base, "default")),
+            base.join("credentials.tmp")
+        );
+    }
+
+    #[test]
+    fn persist_login_client_decisions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let candidates = |name| crate::profile::client_config_candidates(base, name);
+        let resolve = |name| crate::profile::resolve_client_config_path(base, name);
+        let work_own = candidates("work")[0].clone();
+        let default_own = candidates("default")[0].clone();
+
+        // Nothing saved anywhere: persist for both default and named profiles.
+        assert!(should_persist_login_client(
+            true,
+            &default_own,
+            &resolve("default"),
+            None,
+            "env-id"
+        ));
+        assert!(should_persist_login_client(
+            false,
+            &work_own,
+            &resolve("work"),
+            None,
+            "env-id"
+        ));
+
+        std::fs::write(base.join("client_secret.json"), "{}").unwrap();
+
+        // Shared exists, env client differs, named profile: save to profile dir.
+        assert!(should_persist_login_client(
+            false,
+            &work_own,
+            &resolve("work"),
+            Some("shared-id"),
+            "other-org-id"
+        ));
+        // Same client as the shared one: keep using the fallback.
+        assert!(!should_persist_login_client(
+            false,
+            &work_own,
+            &resolve("work"),
+            Some("shared-id"),
+            "shared-id"
+        ));
+        // Default profile never overwrites its existing file (unchanged).
+        assert!(!should_persist_login_client(
+            true,
+            &default_own,
+            &resolve("default"),
+            Some("shared-id"),
+            "other-org-id"
+        ));
+
+        // A named profile's own file is never overwritten.
+        std::fs::create_dir_all(work_own.parent().unwrap()).unwrap();
+        std::fs::write(&work_own, "{}").unwrap();
+        assert!(!should_persist_login_client(
+            false,
+            &work_own,
+            &resolve("work"),
+            Some("work-id"),
+            "other-org-id"
+        ));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn logout_named_profile_never_targets_credentials_file_env() {
+        unsafe {
+            std::env::set_var(
+                "GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE",
+                "/elsewhere/creds.json",
+            );
+        }
+        let dir = Path::new("/cfg/gws/profiles/work");
+        let named = crate::profile::resolve_profile(None, Some("work")).unwrap();
+        let named_path = logout_plain_credentials_path(&named, dir);
+        let default_path =
+            logout_plain_credentials_path(&crate::profile::ActiveProfile::default_profile(), dir);
+        unsafe {
+            std::env::remove_var("GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE");
+        }
+        assert_eq!(named_path, dir.join("credentials.json"));
+        // Unchanged behavior for the default profile.
+        assert_eq!(default_path, PathBuf::from("/elsewhere/creds.json"));
+    }
+
     #[tokio::test]
     async fn handle_auth_command_empty_args_prints_usage() {
         let args: Vec<String> = vec![];
@@ -1942,7 +2180,7 @@ mod tests {
         }
         // When no env vars AND no client_secret.json on disk, should fail
         let result = resolve_client_credentials();
-        if !crate::oauth_config::client_config_path().exists() {
+        if !crate::oauth_config::resolved_client_config_path().exists() {
             assert!(result.is_err());
             match result.unwrap_err() {
                 GwsError::Auth(msg) => assert!(msg.contains("No OAuth client configured")),

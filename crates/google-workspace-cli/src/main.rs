@@ -34,6 +34,7 @@ mod helpers;
 mod logging;
 mod oauth_config;
 mod output;
+mod profile;
 mod schema;
 mod services;
 mod setup;
@@ -60,7 +61,9 @@ async fn main() {
 }
 
 async fn run() -> Result<(), GwsError> {
-    let args: Vec<String> = std::env::args().collect();
+    let raw_args: Vec<String> = std::env::args().collect();
+    // Strip the global `--profile` flag once so the rest of dispatch never sees it.
+    let args = profile::init(&raw_args)?;
 
     if args.len() < 2 {
         print_usage();
@@ -457,6 +460,7 @@ fn print_usage() {
     println!("    --output <PATH>       Output file path for binary responses");
     println!("    --format <FMT>        Output format: json (default), table, yaml, csv");
     println!("    --api-version <VER>   Override the API version (e.g., v2, v3)");
+    println!("    --profile <NAME>      Use a named auth profile (default: default)");
     println!("    --page-all            Auto-paginate, one JSON line per page (NDJSON)");
     println!("    --page-limit <N>      Max pages to fetch with --page-all (default: 10)");
     println!("    --page-delay <MS>     Delay between pages in ms (default: 100)");
@@ -475,6 +479,7 @@ fn print_usage() {
     println!("ENVIRONMENT:");
     println!("    GOOGLE_WORKSPACE_CLI_TOKEN               Pre-obtained OAuth2 access token (highest priority)");
     println!("    GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE    Path to OAuth credentials JSON file");
+    println!("    GOOGLE_WORKSPACE_CLI_PROFILE             Named auth profile to use (overridden by --profile)");
     println!("    GOOGLE_WORKSPACE_CLI_CLIENT_ID           OAuth client ID (for gws auth login)");
     println!(
         "    GOOGLE_WORKSPACE_CLI_CLIENT_SECRET       OAuth client secret (for gws auth login)"
